@@ -46,7 +46,10 @@ Three commands, nothing else:
 
 - `keygen` — creates `~/.local/state/opaquify/main.key` (one key per user)
 - `seal <file> KEY` — encrypts a value (read from **stdin only**) into the
-  file, writing `KEY=age1:<ciphertext>`; an existing line is replaced
+  file, writing `KEY=age1:<ciphertext>`; an existing line is replaced. The file
+  must already exist with at least one entry: a wrong path then fails loudly
+  instead of silently shrinking a whole env file to a single line
+  (`OPAQIFY_SEAL_CREATE=1` opts into creating a new file)
 - `run <file> -- <command...>` — decrypts the sealed values into the child
   process environment and runs the command; its exit code is passed through
 

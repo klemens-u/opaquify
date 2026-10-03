@@ -129,6 +129,29 @@ def test_env_key_path_override(tmp_path, have_age):
     assert kp.exists()
     assert not (tmp_path / "state" / "opaquify" / "main.key").exists()
     env = tmp_path / "x.env"
+    env.write_text("A=1\n")            # existing file: seal replaces in place
     r = run(tmp_path, "seal", str(env), "TOK", stdin="abc", env=e)
     assert r.returncode == 0, r.stderr
     assert "TOK=age1:" in env.read_text()
+
+
+def test_seal_refuses_to_create_a_bare_file(tmp_path, key):
+    """A typo in the path must not silently produce a one-line env file."""
+    missing = tmp_path / "typo.env"
+    r = run(tmp_path, "seal", str(missing), "TOK", stdin="x")
+    assert r.returncode != 0
+    assert "refusing to write" in r.stderr
+    assert not missing.exists()
+    # an existing file with only comments counts as empty too
+    only_comments = tmp_path / "comments.env"
+    only_comments.write_text("# nothing here yet\n\n")
+    r = run(tmp_path, "seal", str(only_comments), "TOK", stdin="x")
+    assert r.returncode != 0
+    assert only_comments.read_text() == "# nothing here yet\n\n"   # untouched
+
+
+def test_seal_create_can_be_opted_into(tmp_path, key):
+    fresh = tmp_path / "new.env"
+    r = run(tmp_path, "seal", str(fresh), "TOK", stdin="x", env={"OPAQIFY_SEAL_CREATE": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "TOK=age1:" in fresh.read_text()

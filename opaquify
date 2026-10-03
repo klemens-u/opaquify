@@ -115,13 +115,23 @@ def cmd_keygen() -> None:
 
 def cmd_seal(path: str, key_name: str) -> None:
     """The value comes from stdin ONLY — never from argv (argv shows up in ps,
-    shell history and agent transcripts)."""
+    shell history and agent transcripts).
+
+    Writes the sealed line into the file, keeping everything else. Refuses to
+    create a bare file when the path is missing or empty: a typo then reads as
+    an error instead of silently replacing a full env file with one line.
+    """
     value = sys.stdin.read()
     k = key_path()
     if not os.path.exists(k):
         die(f"key not found: {k} (run: opaquify keygen)")
-    sealed = f"{key_name}={encrypt_value(k, value)}"
     lines = read_text(path).splitlines()
+    body = [l for l in lines if l.strip() and not l.strip().startswith("#")]
+    if not body and os.environ.get("OPAQIFY_SEAL_CREATE") != "1":
+        die(f"refusing to write {path}: it does not exist or has no entries yet\n"
+            f"  (a typo here would turn a whole env file into one line — create it\n"
+            f"   first, or set OPAQIFY_SEAL_CREATE=1 to start a new file)")
+    sealed = f"{key_name}={encrypt_value(k, value)}"
     if not lines:
         lines = ["# opaquify env file — sealed values start with age1:",
                  "# every other line stays readable as written", ""]
