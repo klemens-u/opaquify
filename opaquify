@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 """opaquify — keep secret VALUES out of sight, keep the file readable.
 
-An opaquify .env file looks and reads like a normal env file; only lines whose
-value the operator sealed are ciphertext. Secrets are decrypted into the
+An opaquify env file looks and reads like a normal env file; only the lines
+whose value was sealed are ciphertext. Sealed values are decrypted into the
 environment of a child process at run time — never written to disk, never
 printed, never passed through argv.
 
-  opaquify keygen <name>                      create key file (600, non-obvious default)
-  printf 'secret' | opaquify seal <file> KEY  encrypt one value into the file
-  opaquify run <file> -- <command...>         decrypt + export env to the command
-  opaquify verify <file>                      MAC check over the plaintext lines
+  opaquify keygen                        create the key (0600)
+  printf 'secret' | opaquify seal <f> KEY  encrypt one value into the file
+  opaquify run <f> -- <command...>       decrypt + export env to the command
 
-Honest model: this protects against *accidental* exposure (cat, logs, agent
-turns). A same-user process that deliberately reads the key file and decrypts
-can always win — that trust boundary needs a separate broker/service.
+One key per user (default ~/.local/state/opaquify/main.key), no key names to
+manage. Honest model: this protects against *accidental* exposure (cat, logs,
+agent turns). A same-user process that deliberately reads the key file can
+always win — that trust boundary needs a separate broker.
 """
 import base64
-import hashlib
-import hmac
 import os
-import shutil
 import subprocess
 import sys
 
-MARKER = "age1:"          # a sealed value
-MAC_PREFIX = "# opaquify-mac:"   # HMAC over all plaintext lines (tamper check)
+VERSION = "0.2.0"
+MARKER = "age1:"          # a sealed value starts with this
 
 DEFAULT_DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
@@ -36,19 +33,17 @@ def _age(): return os.environ.get("OPAQIFY_AGE_BIN", "age")
 def _age_keygen(): return os.environ.get("OPAQIFY_AGE_KEYGEN_BIN", "age-keygen")
 
 
-def key_path(name: str) -> str:
-    """OPAQIFY_KEY_PATH wins; default ~/.local/state/opaquify/<name>.key."""
-    if os.environ.get("OPAQIFY_KEY_PATH"):
-        return os.environ["OPAQIFY_KEY_PATH"]
-    return os.path.join(DEFAULT_DIR, f"{name}.key")
+def key_path() -> str:
+    """OPAQIFY_KEY_PATH wins; otherwise one key per user."""
+    return os.environ.get("OPAQIFY_KEY_PATH") or os.path.join(DEFAULT_DIR, "main.key")
 
 
-def die(msg: str, code: int = 1) -> "NoReturn":
+def die(msg: str, code: int = 1) -> None:
     print(f"opaquify: {msg}", file=sys.stderr)
     sys.exit(code)
 
 
-# -- crypto (shells out to age; the value never crosses our stdout) ---------
+# -- crypto: shell out to age; the plaintext never crosses our stdout --------
 
 def encrypt_value(key: str, value: str) -> str:
     p = subprocess.run([_age(), "-e", "-i", key], input=value.encode(),
@@ -59,7 +54,6 @@ def encrypt_value(key: str, value: str) -> str:
 
 
 def decrypt_value(key: str, sealed: str) -> str:
-    assert sealed.startswith(MARKER)
     p = subprocess.run([_age(), "-d", "-i", key],
                        input=base64.b64decode(sealed[len(MARKER):]),
                        capture_output=True)
@@ -70,11 +64,11 @@ def decrypt_value(key: str, sealed: str) -> str:
 
 # -- file handling -----------------------------------------------------------
 
-def parse_env(lines: list[str], key: str) -> dict:
-    """KEY=VALUE lines -> dict; sealed values decrypted. Kept minimal on
-    purpose (no expansion, no conditional logic) so the model is auditable."""
+def parse_env(text: str, key: str) -> dict:
+    """KEY=VALUE lines -> dict; sealed values decrypted. Deliberately minimal:
+    no expansion, no conditionals, nothing shell-like, so it stays auditable."""
     env = {}
-    for line in lines:
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -89,152 +83,104 @@ def parse_env(lines: list[str], key: str) -> dict:
     return env
 
 
-def mac_lines(lines: list[str]) -> str:
-    """HMAC-SHA256 over the file with the MAC line itself removed."""
-    data = b"".join(
-        l.encode() for l in lines if not l.startswith(MAC_PREFIX))
-    return hmac.new(b"opaquify-v1", data, hashlib.sha256).hexdigest()
-
-
-def with_mac(lines: list[str]) -> list[str]:
-    out = [l for l in lines if not l.startswith(MAC_PREFIX)]
-    return [MAC_PREFIX + mac_lines(out), *out]
-
-
-def read_lines(path: str) -> list[str]:
+def read_text(path: str) -> str:
     if not os.path.exists(path):
-        return []
+        return ""
     with open(path, encoding="utf-8") as f:
-        return f.read().splitlines()
+        return f.read()
 
 
-def write_lines(path: str, lines: list[str]) -> None:
+def write_text(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
+        f.write(text)
 
 
 # -- commands ----------------------------------------------------------------
 
-def cmd_keygen(name: str) -> None:
-    path = key_path(name)
+def cmd_keygen() -> None:
+    path = key_path()
     if os.path.exists(path):
-        die(f"key already exists: {path}")
+        die(f"key already exists: {path}  (remove it to start over)")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     os.umask(0o077)
     p = subprocess.run([_age_keygen(), "-o", path], capture_output=True)
     if p.returncode != 0:
         die(f"age-keygen failed: {p.stderr.decode(errors='replace').strip()}")
     os.chmod(path, 0o600)
-    pub = next(
-        (l.split(": ", 1)[1].strip() for l in open(path)
-         if l.startswith("# public key:")), "?")
+    pub = next((l.split(": ", 1)[1].strip() for l in read_text(path).splitlines()
+                if l.startswith("# public key:")), "?")
     print(f"created {path} (0600)  public key: {pub}")
 
 
 def cmd_seal(path: str, key_name: str) -> None:
-    """Read the value from stdin ONLY — never from argv (argv is visible in
-    ps, shell history and agent transcripts)."""
+    """The value comes from stdin ONLY — never from argv (argv shows up in ps,
+    shell history and agent transcripts)."""
     value = sys.stdin.read()
-    k = key_path_from_file(path)
+    k = key_path()
     if not os.path.exists(k):
-        die(f"key not found: {k} (run: opaquify keygen {os.path.splitext(os.path.basename(path))[0]})")
-    sealed = encrypt_value(k, value)
-    lines = read_lines(path)
-    if not lines:  # fresh file: header explains the format
+        die(f"key not found: {k} (run: opaquify keygen)")
+    sealed = f"{key_name}={encrypt_value(k, value)}"
+    lines = read_text(path).splitlines()
+    if not lines:
         lines = ["# opaquify env file — sealed values start with age1:",
-                 "# plaintext lines stay readable", ""]
-    out = []
-    replaced = False
+                 "# every other line stays readable as written", ""]
+    out, replaced = [], False
     for line in lines:
-        if line.startswith(MAC_PREFIX):
-            continue
-        kk, _, _ = line.partition("=")
-        if kk.strip() == key_name:
-            out.append(f"{key_name}={sealed}")
+        if line.partition("=")[0].strip() == key_name:
+            out.append(sealed)
             replaced = True
         else:
             out.append(line)
     if not replaced:
-        out.append(f"{key_name}={sealed}")
-    write_lines(path, with_mac(out))
-    print(f"{key_name}={sealed}")
+        out.append(sealed)
+    write_text(path, "\n".join(out) + "\n")
+    print(sealed)
 
 
 def cmd_run(path: str, command: list[str]) -> None:
-    k = key_path_from_file(path)  # key derives from the file name if present
     if not os.path.exists(path):
         die(f"no such file: {path}")
-    lines = read_lines(path)
-    if not any("=" in l and not l.strip().startswith("#") for l in lines):
-        die(f"no KEY=VALUE lines in {path}")
+    k = key_path()
+    if not os.path.exists(k):
+        die(f"key not found: {k} (run: opaquify keygen)")
     child_env = dict(os.environ)
-    # decrypt only the values we have the key for; a missing key yields a
-    # clear error instead of a silent empty variable
-    child_env.update(parse_env(lines, k))
-    p = subprocess.run(command, env=child_env)
-    sys.exit(p.returncode)
+    child_env.update(parse_env(read_text(path), k))
+    sys.exit(subprocess.run(command, env=child_env).returncode)
 
 
-def key_path_from_file(path: str) -> str:
-    """run picks the key by OPAQIFY_KEY_PATH or the FILE's basename, so
-    `opaquify run mail.env` uses mail.key without extra args (KISS)."""
-    if os.environ.get("OPAQIFY_KEY_PATH"):
-        return os.environ["OPAQIFY_KEY_PATH"]
-    return key_path(os.path.splitext(os.path.basename(path))[0])
+USAGE = """opaquify — keep secret values out of sight, keep the file readable
 
-
-def cmd_verify(path: str) -> None:
-    if not os.path.exists(path):
-        die(f"no such file: {path}")
-    lines = read_lines(path)
-    stored = next((l[len(MAC_PREFIX):].strip() for l in lines
-                   if l.startswith(MAC_PREFIX)), None)
-    if stored is None:
-        die("no MAC line in file (was it sealed with opaquify?)")
-    if stored != mac_lines(lines):
-        die("MAC mismatch — plaintext lines were modified")
-    print("ok — plaintext lines untouched")
-
-
-USAGE = """usage:
-  opaquify keygen <name>
+usage:
+  opaquify keygen
   printf 'secret' | opaquify seal <file> KEY
   opaquify run <file> -- <command...>
-  opaquify verify <file>
 
 env:
-  OPAQIFY_KEY_PATH      key file path (default: ~/.local/state/opaquify/<name>.key)
-  OPAQIFY_AGE_BIN       age binary (default: age)
+  OPAQIFY_KEY_PATH        key file (default: ~/.local/state/opaquify/main.key)
+  OPAQIFY_AGE_BIN         age binary (default: age)
   OPAQIFY_AGE_KEYGEN_BIN  age-keygen binary (default: age-keygen)"""
 
 
 def main(argv: list[str]) -> None:
-    if len(argv) < 2:
+    if len(argv) < 2 or argv[1] in ("--help", "-h", "help"):
         print(USAGE)
-        sys.exit(2)
+        sys.exit(0 if len(argv) > 1 else 2)
     cmd = argv[1]
-    if cmd == "keygen":
-        if len(argv) != 3:
-            die("usage: opaquify keygen <name>", 2)
-        cmd_keygen(argv[2])
+    if cmd in ("--version", "-V"):
+        print(f"opaquify {VERSION}")
+    elif cmd == "keygen":
+        if len(argv) != 2:
+            die("usage: opaquify keygen", 2)
+        cmd_keygen()
     elif cmd == "seal":
         if len(argv) != 4:
             die("usage: printf 'secret' | opaquify seal <file> KEY", 2)
         cmd_seal(argv[2], argv[3])
     elif cmd == "run":
-        if "--" not in argv:
+        if len(argv) < 4 or argv[3] != "--":
             die("usage: opaquify run <file> -- <command...>", 2)
-        i = argv.index("--")
-        if i != 3:
-            die("usage: opaquify run <file> -- <command...>", 2)
-        cmd_run(argv[2], argv[i + 1:])
-    elif cmd == "verify":
-        if len(argv) != 3:
-            die("usage: opaquify verify <file>", 2)
-        cmd_verify(argv[2])
-    elif cmd in ("--help", "-h", "help"):
-        print(USAGE)
+        cmd_run(argv[2], argv[4:])
     else:
         die(f"unknown command: {cmd}", 2)
 
