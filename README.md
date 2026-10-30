@@ -58,6 +58,7 @@ Three commands, nothing else:
 - `KEY=...` lines; values starting with `age1:` are sealed
 - everything else (comments, config, blank lines) is kept exactly as written
 - a value wrapped in matching `"` or `'` is unwrapped
+- values are stripped of trailing whitespace on read; seal with or without a trailing newline, the result is the same
 - minimal by design: no expansion, no conditionals, nothing shell-like
 
 ## Configuration

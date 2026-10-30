@@ -155,3 +155,25 @@ def test_seal_create_can_be_opted_into(tmp_path, key):
     r = run(tmp_path, "seal", str(fresh), "TOK", stdin="x", env={"OPAQIFY_SEAL_CREATE": "1"})
     assert r.returncode == 0, r.stderr
     assert "TOK=age1:" in fresh.read_text()
+
+
+def test_run_strips_trailing_newline_from_sealed_value(tmp_path, key):
+    """A stdin/heredoc value carries its appended newline inside the
+    ciphertext; run must hand the child the bare value (Zabbix rejects
+    `Bearer <token>\n`). Sealing with or without the newline must give
+    the identical child env value.
+    """
+    for newline in ("\n", ""):
+        env = tmp_path / f"tok{ 'nl' if newline else 'plain'}.env"
+        env.write_text("PLAIN=seed\n")
+        r = run(tmp_path, "seal", str(env), "TOK", stdin="secret" + newline)
+        assert r.returncode == 0, r.stderr
+        probe = tmp_path / f"probe{ 'nl' if newline else 'plain'}.py"
+        probe.write_text(
+            "import os, sys\n"
+            "v = os.environ['TOK']\n"
+            "print(len(v))\n"
+            "sys.exit(0 if v == 'secret' else 9)\n")
+        r = run(tmp_path, "run", str(env), "--", sys.executable, str(probe))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "6"

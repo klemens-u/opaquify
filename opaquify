@@ -79,6 +79,10 @@ def parse_env(text: str, key: str) -> dict:
             v = v.strip()
             if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
                 v = v[1:-1]
+        # strip trailing whitespace: a value sealed via stdin/heredoc carries
+        # its appended newline inside the ciphertext (Zabbix rejects a Bearer
+        # token ending in \n); plaintext values are already stripped above.
+        v = v.rstrip()
         env[k.strip()] = v
     return env
 
