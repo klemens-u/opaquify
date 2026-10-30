@@ -36,7 +36,13 @@ No version pinning on purpose: `opaquify --version` tells you what you run.
 ```bash
 opaquify keygen                                # one key per user (0600)
 
+# pipe the value in (scripted, one-shot):
 printf 'super-geheim' | opaquify seal mail.env MAIL_PASSWORD
+
+# or run interactively — opaquify prompts hidden (via /dev/tty, never in
+# shell history or ps), twice by default, empty input aborts:
+opaquify seal mail.env MAIL_PASSWORD
+opaquify seal mail.env MAIL_PASSWORD --no-confirm   # single prompt
 
 opaquify run mail.env -- himalaya envelope list "not flag seen"
 opaquify run mail.env -- python3 send.py
@@ -45,11 +51,15 @@ opaquify run mail.env -- python3 send.py
 Three commands, nothing else:
 
 - `keygen` — creates `~/.local/state/opaquify/main.key` (one key per user)
-- `seal <file> KEY` — encrypts a value (read from **stdin only**) into the
-  file, writing `KEY=age1:<ciphertext>`; an existing line is replaced. The file
-  must already exist with at least one entry: a wrong path then fails loudly
-  instead of silently shrinking a whole env file to a single line
-  (`OPAQIFY_SEAL_CREATE=1` opts into creating a new file)
+- `seal <file> KEY [--no-confirm]` — encrypts a value into the file,
+  writing `KEY=age1:<ciphertext>`; an existing line is replaced. The value
+  comes from stdin only (never argv, so nothing lands in `ps` or a shell
+  history): either piped in (`printf '…' | …`) or, when stdin is a tty,
+  via a hidden `getpass` prompt (twice by default, `--no-confirm` for one;
+  empty first input aborts). The file must already exist with at least one
+  entry: a wrong path then fails loudly instead of silently shrinking a
+  whole env file to a single line (`OPAQIFY_SEAL_CREATE=1` opts into
+  creating a new file)
 - `run <file> -- <command...>` — decrypts the sealed values into the child
   process environment and runs the command; its exit code is passed through
 
@@ -76,6 +86,12 @@ secret-shaped name.
 
 - Protects against **accidental** exposure: `cat`, log dumps, screenshots,
   agent turns that read files. A sealed file leaks nothing readable.
+- The interactive `seal` prompt reads directly from `/dev/tty` via
+  `getpass`, not through the shell — `set -x`, `history`, and tracing
+  plugins see only the `seal` command, never the value. The piped form
+  (`printf '…' | opaquify seal …`) still puts the value in a short-lived
+  process argv, visible in `ps` for a split second; use the interactive
+  form when the value is already on your screen.
 - The key is a same-user file: any process running as the same user can
   deliberately read it and decrypt. That trust boundary is not solved here —
   for that, put decryption behind a privileged helper or broker that exposes a
@@ -92,7 +108,10 @@ python3 -m pytest tests/        # requires age on PATH (or OPAQIFY_AGE_BIN)
 
 End-to-end subprocess tests: version, the removed commands stay removed,
 keygen, sealing + readability, run + env injection, exit-code propagation, a
-clear error when the key is missing, key-path override.
+clear error when the key is missing, key-path override, the trailing-newline
+fix (seal with or without `\n` gives the same child env value), and the
+interactive `getpass` prompt (roundtrip, mismatch, empty-abort, `--no-confirm`)
+exercised through a real pty.
 
 ## License
 

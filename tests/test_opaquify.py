@@ -150,6 +150,83 @@ def test_seal_refuses_to_create_a_bare_file(tmp_path, key):
     assert only_comments.read_text() == "# nothing here yet\n\n"   # untouched
 
 
+def test_seal_pipe_still_works_with_newline(tmp_path, key):
+    """The original piped path (printf '…' | opaquify seal …) is unchanged;
+    the trailing-newline fix lives in parse_env, not in cmd_seal.
+    """
+    env = tmp_path / "x.env"
+    env.write_text("PLAIN=seed\n")
+    r = run(tmp_path, "seal", str(env), "TOK", stdin="secret\n")
+    assert r.returncode == 0, r.stderr
+    assert "TOK=age1:" in env.read_text()
+
+
+import pty as _pty
+import time as _time
+
+
+def run_pty(tmp_path, args, feed: str, timeout: float = 5.0):
+    """Run the script with a real pty as stdin *and* as /dev/tty (which is
+    what getpass reads from). The child's stdin/stderr are dup2'd onto the
+    pty slave fd in preexec_fn; we then close the slave in the parent and
+    drive the child through the master. Returns (rc, stdout, stderr).
+    """
+    master, slave = _pty.openpty()
+    p = subprocess.Popen(
+        [sys.executable, SCRIPT, *args],
+        stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "XDG_STATE_HOME": str(tmp_path / "state")},
+        preexec_fn=(lambda s=slave: os.dup2(s, 2) or os.close(s)),
+    )
+    os.close(slave)  # parent keeps only the master
+    # Feed each line after a short pause so the child is inside getpass.
+    for line in feed.split("\n"):
+        _time.sleep(0.2)  # let the child reach getpass
+        os.write(master, (line + "\n").encode())
+    # Read stdout/stderr to completion; the child exits after the last prompt.
+    out = p.stdout.read()
+    err = p.stderr.read()
+    p.wait(timeout=timeout)
+    os.close(master)
+    return p.returncode, out.decode(), err.decode()
+
+
+def test_seal_tty_prompt_roundtrip(tmp_path, key):
+    env = tmp_path / "x.env"
+    env.write_text("PLAIN=seed\n")
+    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "secret\nsecret")
+    assert rc == 0, err
+    assert "TOK=age1:" in env.read_text()
+    assert "secret" not in env.read_text()
+
+
+def test_seal_tty_prompt_mismatch_refuses(tmp_path, key):
+    env = tmp_path / "x.env"
+    env.write_text("PLAIN=seed\n")
+    before = env.read_text()
+    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "secret\noops")
+    assert rc != 0
+    assert env.read_text() == before  # untouched: no partial write
+
+
+def test_seal_tty_prompt_empty_aborts(tmp_path, key):
+    env = tmp_path / "x.env"
+    env.write_text("PLAIN=seed\n")
+    before = env.read_text()
+    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "\n")
+    assert rc != 0
+    assert env.read_text() == before  # untouched: empty input aborts
+
+
+def test_seal_tty_prompt_no_confirm(tmp_path, key):
+    env = tmp_path / "x.env"
+    env.write_text("PLAIN=seed\n")
+    rc, out, err = run_pty(
+        tmp_path, ["seal", str(env), "TOK", "--no-confirm"], "secret")
+    assert rc == 0, err
+    assert "TOK=age1:" in env.read_text()
+
+
 def test_seal_create_can_be_opted_into(tmp_path, key):
     fresh = tmp_path / "new.env"
     r = run(tmp_path, "seal", str(fresh), "TOK", stdin="x", env={"OPAQIFY_SEAL_CREATE": "1"})
@@ -159,9 +236,9 @@ def test_seal_create_can_be_opted_into(tmp_path, key):
 
 def test_run_strips_trailing_newline_from_sealed_value(tmp_path, key):
     """A stdin/heredoc value carries its appended newline inside the
-    ciphertext; run must hand the child the bare value (Zabbix rejects
-    `Bearer <token>\n`). Sealing with or without the newline must give
-    the identical child env value.
+    ciphertext; run must hand the child the bare value (some consumers
+    reject a trailing newline). Sealing with or without the newline must
+    give the identical child env value.
     """
     for newline in ("\n", ""):
         env = tmp_path / f"tok{ 'nl' if newline else 'plain'}.env"

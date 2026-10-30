@@ -16,6 +16,7 @@ agent turns). A same-user process that deliberately reads the key file can
 always win — that trust boundary needs a separate broker.
 """
 import base64
+import getpass
 import os
 import subprocess
 import sys
@@ -79,9 +80,10 @@ def parse_env(text: str, key: str) -> dict:
             v = v.strip()
             if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
                 v = v[1:-1]
-        # strip trailing whitespace: a value sealed via stdin/heredoc carries
-        # its appended newline inside the ciphertext (Zabbix rejects a Bearer
-        # token ending in \n); plaintext values are already stripped above.
+        # strip trailing whitespace: a stdin/heredoc value carries its appended
+        # newline inside the ciphertext; some consumers (strict Bearer-token
+        # validators) reject a trailing \n. Plaintext values are already
+        # stripped above, so this is a no-op for them.
         v = v.rstrip()
         env[k.strip()] = v
     return env
@@ -117,15 +119,40 @@ def cmd_keygen() -> None:
     print(f"created {path} (0600)  public key: {pub}")
 
 
-def cmd_seal(path: str, key_name: str) -> None:
+def _prompt_for_value(key_name: str, no_confirm: bool) -> str:
+    """Interactive path: read the value straight from /dev/tty (hidden, twice
+    by default). Never touches shell history, set -x traces, or the agent
+    transcript — getpass bypasses the shell entirely. An empty first answer
+    aborts instead of sealing an empty value.
+    """
+    value = getpass.getpass(f"{key_name} (hidden, empty to abort): ")
+    if not value:
+        die("aborted: no value entered")
+    if not no_confirm:
+        confirm = getpass.getpass("confirm: ")
+        if value != confirm:
+            die("mismatch, try again")
+    return value
+
+
+def cmd_seal(path: str, key_name: str, no_confirm: bool = False) -> None:
     """The value comes from stdin ONLY — never from argv (argv shows up in ps,
-    shell history and agent transcripts).
+    shell history and agent transcripts). Two input paths:
+
+    - piped (printf '…' | opaquify seal …): stdin is read as-is; a trailing
+      newline is stripped later in parse_env (see the rstrip comment there).
+    - interactive (no pipe, stdin is a tty): getpass prompts hidden, twice by
+      default (--no-confirm for one). The value never enters the shell, so
+      nothing lands in history, ps, or a transcript. Empty first input aborts.
 
     Writes the sealed line into the file, keeping everything else. Refuses to
     create a bare file when the path is missing or empty: a typo then reads as
     an error instead of silently replacing a full env file with one line.
     """
-    value = sys.stdin.read()
+    if sys.stdin.isatty():
+        value = _prompt_for_value(key_name, no_confirm)
+    else:
+        value = sys.stdin.read()
     k = key_path()
     if not os.path.exists(k):
         die(f"key not found: {k} (run: opaquify keygen)")
@@ -168,6 +195,7 @@ USAGE = """opaquify — keep secret values out of sight, keep the file readable
 usage:
   opaquify keygen
   printf 'secret' | opaquify seal <file> KEY
+  opaquify seal <file> KEY [--no-confirm]   # interactive: hidden prompt, twice
   opaquify run <file> -- <command...>
 
 env:
@@ -188,9 +216,11 @@ def main(argv: list[str]) -> None:
             die("usage: opaquify keygen", 2)
         cmd_keygen()
     elif cmd == "seal":
-        if len(argv) != 4:
-            die("usage: printf 'secret' | opaquify seal <file> KEY", 2)
-        cmd_seal(argv[2], argv[3])
+        args = argv[2:]
+        if len(args) < 2 or len(args) > 3 or (len(args) == 3 and args[2] != "--no-confirm"):
+            die("usage: opaquify seal <file> KEY [--no-confirm]", 2)
+        no_confirm = len(args) == 3 and args[2] == "--no-confirm"
+        cmd_seal(args[0], args[1], no_confirm)
     elif cmd == "run":
         if len(argv) < 4 or argv[3] != "--":
             die("usage: opaquify run <file> -- <command...>", 2)
