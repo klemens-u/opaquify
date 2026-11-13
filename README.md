@@ -31,6 +31,18 @@ curl -fsSL https://raw.githubusercontent.com/klemens-u/opaquify/main/opaquify \
 
 No version pinning on purpose: `opaquify --version` tells you what you run.
 
+## Versioning
+
+- Every change to `opaquify` bumps `VERSION` in the same commit — the number
+  is the only thing that tells two installs apart, since everyone follows
+  `main`.
+- Third digit: a small change (fix, tweak, docs-level) — `0.3.0` → `0.3.1`.
+- Second digit: a larger change (new or dropped behavior, interface, file
+  format) — `0.3.1` → `0.4.0`.
+- The major stays `0` until that is decided explicitly. The digits describe
+  the size of the change, not SemVer compatibility: a third-digit bump here
+  may well change behavior.
+
 ## Usage
 
 ```bash

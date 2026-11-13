@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 MARKER = "age1:"          # a sealed value starts with this
 
 DEFAULT_DIR = os.path.join(
