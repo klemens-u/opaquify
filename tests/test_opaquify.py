@@ -194,17 +194,18 @@ def run_pty(tmp_path, args, feed: str, timeout: float = 5.0):
 def test_seal_tty_prompt_roundtrip(tmp_path, key):
     env = tmp_path / "x.env"
     env.write_text("PLAIN=seed\n")
-    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "secret\nsecret")
+    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "secret")
     assert rc == 0, err
     assert "TOK=age1:" in env.read_text()
     assert "secret" not in env.read_text()
 
 
-def test_seal_tty_prompt_mismatch_refuses(tmp_path, key):
+def test_seal_tty_prompt_whitespace_only_aborts(tmp_path, key):
+    """A stray Enter (or a pasted newline) seals nothing - not an empty secret."""
     env = tmp_path / "x.env"
     env.write_text("PLAIN=seed\n")
     before = env.read_text()
-    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "secret\noops")
+    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "   ")
     assert rc != 0
     assert env.read_text() == before  # untouched: no partial write
 
@@ -218,13 +219,13 @@ def test_seal_tty_prompt_empty_aborts(tmp_path, key):
     assert env.read_text() == before  # untouched: empty input aborts
 
 
-def test_seal_tty_prompt_no_confirm(tmp_path, key):
+def test_seal_tty_prompt_no_confirm_flag_is_gone(tmp_path, key):
+    """One prompt is the only mode; the old flag is an error, not a silent no-op."""
     env = tmp_path / "x.env"
     env.write_text("PLAIN=seed\n")
-    rc, out, err = run_pty(
-        tmp_path, ["seal", str(env), "TOK", "--no-confirm"], "secret")
-    assert rc == 0, err
-    assert "TOK=age1:" in env.read_text()
+    r = run(tmp_path, "seal", str(env), "TOK", "--no-confirm", stdin="secret")
+    assert r.returncode == 2
+    assert "usage: opaquify seal <file> KEY" in r.stderr
 
 
 def test_seal_create_can_be_opted_into(tmp_path, key):
@@ -234,11 +235,25 @@ def test_seal_create_can_be_opted_into(tmp_path, key):
     assert "TOK=age1:" in fresh.read_text()
 
 
+def test_seal_trims_whitespace(tmp_path, key):
+    """Piped and interactive values are trimmed before encrypting: what you
+    seal is what the child gets (a pasted token must not carry a newline)."""
+    env = tmp_path / "w.env"
+    env.write_text("PLAIN=seed\n")
+    probe = [sys.executable, "-c",
+             "import os,sys; v=os.environ['TOK']; sys.exit(0 if v=='secret' else 9)"]
+    r = run(tmp_path, "seal", str(env), "TOK", stdin="  secret\n\n")
+    assert r.returncode == 0, r.stderr
+    assert run(tmp_path, "run", str(env), "--", *probe).returncode == 0
+
+    rc, out, err = run_pty(tmp_path, ["seal", str(env), "TOK"], "  secret  ")
+    assert rc == 0, err
+    assert run(tmp_path, "run", str(env), "--", *probe).returncode == 0
+
+
 def test_run_strips_trailing_newline_from_sealed_value(tmp_path, key):
-    """A stdin/heredoc value carries its appended newline inside the
-    ciphertext; run must hand the child the bare value (some consumers
-    reject a trailing newline). Sealing with or without the newline must
-    give the identical child env value.
+    """Sealing with or without a trailing newline gives the identical child
+    env value (0.3.1 strips at seal time; run still repairs older files).
     """
     for newline in ("\n", ""):
         env = tmp_path / f"tok{ 'nl' if newline else 'plain'}.env"
